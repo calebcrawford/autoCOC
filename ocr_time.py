@@ -74,3 +74,10 @@ def find_times(img):
         if found:
             return found, lines, prep
     return [], lines, prep
+
+
+def fmt(secs):
+    d, r = divmod(int(secs), 86400)
+    h, r = divmod(r, 3600)
+    m, s = divmod(r, 60)
+    return " ".join(f"{v}{u}" for v, u in ((d, "d"), (h, "h"), (m, "m"), (s, "s")) if v) or "0s"

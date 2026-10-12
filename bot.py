@@ -6,7 +6,7 @@ import config
 from capture import GameWindow
 from vision import Vision
 from actions import Input
-import ocr_time, state
+import ocr_time, state, glyphs
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(message)s", datefmt="%H:%M:%S")
 log = logging.getLogger("bot")
@@ -109,8 +109,37 @@ class Bot:
         names = config.CONFIRM_BTNS + config.GEM_GUARDS
         return any(self.vis.find(frame, n) for n in names if self.vis.has(n)) or self.gems_prompt()
 
+    def read_upgrade_time(self, frame, pt=None):
+        """Read the 'Upgrade time' value on the confirm dialog with the glyph reader (the game's own font)."""
+        H, W = frame.shape[:2]
+        label = self.vis.find(frame, config.UPGRADE_TIME_LABEL) if self.vis.has(config.UPGRADE_TIME_LABEL) else None
+        if label:
+            x1, x2, y1, y2 = config.UPGRADE_TIME_FROM_LABEL
+            ax, bx, ay, by = label[0] + x1, label[0] + x2, label[1] + y1, label[1] + y2
+        else:
+            fx1, fy1, fx2, fy2 = config.UPGRADE_TIME_REGION
+            ax, bx, ay, by = int(W * fx1), int(W * fx2), int(H * fy1), int(H * fy2)
+        ax, bx, ay, by = max(0, ax), min(W, bx), max(0, ay), min(H, by)
+        crop = frame[ay:by, ax:bx]
+        if crop.size == 0:
+            return None
+        if config.DEBUG:
+            os.makedirs("debug", exist_ok=True)
+            cv2.imwrite(os.path.join("debug", f"{time.strftime('%H%M%S')}_confirm_time.png"), crop)
+        if not glyphs.load():
+            log.info("Upgrade time: no glyph library found (glyphs folder), skipping")
+            return None
+        text, secs, worst = glyphs.read_time(crop)
+        if secs is None:
+            log.info(f"Upgrade time: couldn't read it (saw {text!r}, worst match {worst:.2f}). "
+                     f"Check debug/*_confirm_time.png shows just the value; teach it with learn_glyphs.py")
+            return None
+        log.info(f"Upgrade time on dialog: {ocr_time.fmt(secs)}  (read {text!r}, match {worst:.2f})")
+        return secs
+
     def safe_confirm(self):
         """Click a gold/elixir confirm only if it clearly beats the gem template, then verify it worked."""
+        self._last_secs = None
         frame = self.look()
         gem = max((self.vis.score(frame, g) for g in config.GEM_GUARDS if self.vis.has(g)), default=0.0)
         best_pt, best_sc, best_name = None, 0.0, None
@@ -129,6 +158,7 @@ class Bot:
             log.info("Gem screen looks as likely as a normal confirm, refusing to click")
             self.snap("gem_refused")
             return False
+        self._last_secs = self.read_upgrade_time(frame, best_pt)
         self.inp.click(*best_pt)
         time.sleep(2.0)
         if self.dialog_open():
@@ -385,8 +415,8 @@ class Bot:
         return (self.vis.has(config.BUSY_TEMPLATE)
                 and self.vis.find(self.look(), config.BUSY_TEMPLATE) is not None)
 
-    def verify_started(self, before):
-        """An upgrade only counts if the builder counter actually changed."""
+    def verify_started(self, before, secs=None):
+        """An upgrade counts if the builder counter changed, or if it is so short that it may already be done."""
         if not self.recover():
             return False
         time.sleep(1.0)
@@ -396,7 +426,14 @@ class Bot:
             return True
         diff = float(np.abs(before - after).mean())
         log.info(f"Builder counter change: {diff:.1f} (needs >= {config.COUNTER_DIFF})")
-        return diff >= config.COUNTER_DIFF
+        if diff >= config.COUNTER_DIFF:
+            return True
+        if secs is not None and secs <= config.INSTANT_SECS:
+            log.info(f"Counter unchanged, but this upgrade only takes {ocr_time.fmt(secs)} so it was probably "
+                     f"already finished: counting it as started")
+            return True
+        log.info("Counter unchanged (very short or instant upgrades may not register on the counter)")
+        return False
 
     def _upgrade_loop(self):
         skip = 0  # list entries that failed this cycle (e.g. can't afford)
@@ -411,6 +448,7 @@ class Bot:
             box = self.counter_box(frame)
             self.snap("0_home", [(*box, True)] if box else None)
             before = self.counter_sig()
+            self._last_secs = None
             if not self.open_list():
                 return
             cands = self.upgrade_candidates()
@@ -445,10 +483,15 @@ class Bot:
                     ok = False
                 else:
                     ok = self.safe_confirm()
+            secs = getattr(self, "_last_secs", None)
             if ok:
-                ok = self.verify_started(before)
+                ok = self.verify_started(before, secs)
             if ok:
-                log.info("Upgrade started (builder counter changed)")
+                if secs:
+                    state.add_timer(secs)
+                    log.info(f"Upgrade started, finishes in {ocr_time.fmt(secs)}")
+                else:
+                    log.info("Upgrade started")
             else:
                 log.info("Upgrade did not start, trying next")
                 self.snap("fail")
@@ -508,7 +551,9 @@ class Bot:
         self.recover()
 
     def refresh_timers(self):
-        """Open the builder list, OCR the remaining times, save them to state.json."""
+        """(Optional) Open the builder list, OCR the remaining times, save them to state.json."""
+        if not config.READ_LIST_TIMERS:
+            return None
         if not ocr_time.available():
             if not getattr(self, "_warned_ocr", False):
                 log.info("OCR unavailable (install Tesseract + pip install pytesseract): timers not tracked")
@@ -560,8 +605,8 @@ class Bot:
         return secs
 
     def builders_busy(self):
-        if self.no_builders_free():
-            return True
+        if self.vis.has(config.BUSY_TEMPLATE):
+            return self.no_builders_free()          # the on-screen counter is the ground truth
         return state.active_count() >= config.NUM_BUILDERS
 
     def upgrade(self):

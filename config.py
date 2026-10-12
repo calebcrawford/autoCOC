@@ -68,7 +68,7 @@ RED_RATIO = 0.02          # fraction of red pixels in that box that counts as "u
 
 # ---- Gem safety ----
 GEM_THRESHOLD = 0.70   # a gem template scoring this high is treated as "gem screen present" (deliberately loose)
-CONFIRM_MIN = 0.75     # confirm buttons must match at least this well to be clicked (deliberately strict)
+CONFIRM_MIN = 0.88     # confirm buttons must match at least this well to be clicked (deliberately strict)
 
 # Last-resort fallback if no X template matches: tap here (fractions of the window) to dismiss a popup,
 # e.g. (0.03, 0.5) taps the dimmed area at the far left. None = disabled.
@@ -135,3 +135,38 @@ THRESHOLDS.update({
     "list_gold": 0.74, "list_elixir": 0.74, "list_dark": 0.74,
     "upgrade_gold": 0.72, "upgrade_elixir": 0.72,
 })
+
+# ---- Reading the game's font (glyphs.py) ----
+import os as _os
+GLYPH_DIR = _os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "glyphs")
+GLYPH_MAX_DIST = 0.42     # a character matching worse than this reads as '?'
+GLYPH_W_REL = 0.5         # weight of "height relative to the tallest character" (tells 5 from s)
+GLYPH_W_AR = 0.3          # weight of width/height ratio
+
+# ---- Upgrade time shown on the confirm dialog ("Upgrade time  9m", right of the Confirm button) ----
+# Box (x1, x2, y1, y2) relative to the matched confirm_gold / confirm_elixir ICON centre, covering only the value line
+# (not the words "Upgrade time"). Check debug/..._confirm_time.png and adjust.
+UPGRADE_TIME_BOX = (50, 185, -18, 24)
+INSTANT_SECS = 30         # upgrades this short may finish before the builder counter visibly changes
+READ_LIST_TIMERS = False  # the old list OCR (Tesseract can't read the game's font reliably); dialog times replace it
+
+# Where the "Upgrade time" VALUE sits on the confirm dialog, as fractions of the window: (x1, y1, x2, y2).
+# The dialog is always in the same place, so this doesn't depend on how the confirm templates were cropped.
+# Covers only the value (e.g. "9m"), not the words "Upgrade time". Check debug/..._confirm_time.png.
+UPGRADE_TIME_REGION = (0.733, 0.868, 0.815, 0.926)
+# Optional, more robust to a resized window: capture the words "Upgrade time" as upgrade_time_label. When it is found,
+# the value box is measured from it instead: (x1, x2, y1, y2) relative to the label's centre.
+UPGRADE_TIME_LABEL = "upgrade_time_label"
+UPGRADE_TIME_FROM_LABEL = (-62, 73, 13, 55)
+
+# ---- Background mode ----
+# INPUT_MODE:   "postmessage" = taps are posted straight to the game window: your mouse cursor never moves and the
+#               window doesn't need focus.   "cursor" = the old behaviour (real mouse movement).
+# CAPTURE_MODE: "mss" = screen pixels (the game must be visible, nothing covering it)
+#               "printwindow" / "wgc" = read the window itself, so it can be covered by other windows.
+#               (wgc needs: pip install windows-capture. printwindow needs: pip install pywin32.)
+# The game window must NOT be minimised in any mode: Android stops drawing it.
+# Run probe_background.py to find out what works on your machine.
+INPUT_MODE = "CROSVM_1"
+CAPTURE_MODE = "mss"
+TARGET_CLASS = None     # window class that should receive clicks; None = auto (the probe tells you what worked)

@@ -62,6 +62,10 @@ def run_session():
             bot.close_game()
     finally:
         current = None
+        try:
+            bot.win.close()          # stops the background capture thread, if one is running
+        except Exception:
+            pass
 
 if __name__ == "__main__":
     keyboard.add_hotkey(config.KILL_KEY, on_kill)

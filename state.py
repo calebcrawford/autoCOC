@@ -28,3 +28,11 @@ def next_finish():
     now = time.time()
     future = [t for t in load().get("timers", []) if t > now]
     return min(future) if future else None
+
+
+def add_timer(seconds_left):
+    """Record one more running upgrade (finish time = now + seconds_left); drops timers that already finished."""
+    now = time.time()
+    d = load()
+    timers = [t for t in d.get("timers", []) if t > now] + [now + seconds_left]
+    save({"timers": sorted(timers), "updated": now})

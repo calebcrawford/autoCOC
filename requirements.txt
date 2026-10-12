@@ -5,3 +5,5 @@ pydirectinput
 pygetwindow
 keyboard
 pytesseract
+pywin32
+# windows-capture   (optional: only for CAPTURE_MODE = "wgc")
