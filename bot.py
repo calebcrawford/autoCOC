@@ -1,4 +1,4 @@
-import logging, os, random, time
+import logging, os, random, re, time
 import cv2
 import numpy as np
 import keyboard
@@ -326,15 +326,13 @@ class Bot:
         n = 0
         for kind, names in config.LOOT_GROUPS.items():
             names = [x for x in names if self.vis.has(x)]
+            if not names:
+                continue
             if config.COLLECT_ONE_PER_TYPE:
-                best_pt, best_sc = None, 0.0
-                for name in names:
-                    pt = self.vis.find(frame, name)
-                    if pt:
-                        sc = self.vis.score(frame, name)
-                        if sc > best_sc:
-                            best_pt, best_sc = pt, sc
-                pts = [best_pt] if best_pt else []
+                pt, sc, which = self.vis.best_of(frame, names, stop_at=config.LOOT_STOP)
+                pts = [pt] if pt else []
+                if pt:
+                    log.info(f"  {kind}: matched {which} ({sc:.2f})")
             else:
                 pts = []
                 for name in names:
@@ -364,16 +362,10 @@ class Bot:
         """Affordable builder-list entries, top of the list first."""
         frame = self.look()
         pts = []
-        bpt = self.vis.find(frame, "builder_btn")
-        if bpt:
-            x1, x2, y1, y2 = config.LIST_PANEL_BOX
-            H, W = frame.shape[:2]
-            ax, ay = max(0, bpt[0] + x1), max(0, bpt[1] + y1)
-            panel = frame[ay:min(H, bpt[1] + y2), ax:min(W, bpt[0] + x2)]
-            for name in config.UPGRADE_ITEMS:
-                pts += [(x + ax, y + ay) for x, y in self.vis.find_all(panel, name)]
-        else:
-            log.info("builder_btn not visible, can't locate the list panel")
+        ax, ay, bx, by = self._frac_box(config.SIDEBAR_COST_STRIP, frame)
+        panel = frame[ay:by, ax:bx]
+        for name in config.UPGRADE_ITEMS:
+            pts += [(x + ax, y + ay) for x, y in self.vis.find_all(panel, name)]
         good, boxes = [], []
         for pt in self.dedupe(sorted(pts, key=lambda p: p[1])):
             ratio, (ax, ay, bx, by) = self.red_ratio(frame, pt)
@@ -386,47 +378,69 @@ class Bot:
         return good
 
     def confirm_visible(self):
+        """Is the 'Upgrade X to Level N?' dialog up? The confirm buttons or the 'Upgrade time' label say so."""
         f = self.look()
-        return any(self.vis.find(f, n) for n in config.CONFIRM_BTNS)
+        names = list(config.CONFIRM_BTNS)
+        if self.vis.has(config.UPGRADE_TIME_LABEL):
+            names.append(config.UPGRADE_TIME_LABEL)
+        return any(self.vis.find(f, n) for n in names if self.vis.has(n))
 
     # ---- builder counter ----
-    def counter_box(self, frame):
-        pt = self.vis.find(frame, "builder_btn")
-        if not pt:
-            return None
-        x1, x2, y1, y2 = config.BUILDER_COUNT_BOX
+    # ---- builder counter ("free/total", read with the glyph reader) ----
+    @staticmethod
+    def _frac_box(region, frame):
         H, W = frame.shape[:2]
-        ax, bx = max(0, pt[0] + x1), min(W, pt[0] + x2)
-        ay, by = max(0, pt[1] + y1), min(H, pt[1] + y2)
-        if bx <= ax or by <= ay:
-            return None
-        return ax, ay, bx, by
+        x1, y1, x2, y2 = region
+        return int(W * x1), int(H * y1), int(W * x2), int(H * y2)
 
-    def counter_sig(self):
+    def free_builders(self, kind="builder"):
+        """(free, total) from the on-screen counter, e.g. '1/2' -> (1, 2). kind: "builder" or "lab".
+        None if it can't be read."""
         frame = self.look()
-        box = self.counter_box(frame)
-        if not box:
+        region = (config.COUNT_SIDEBAR if self.list_is_open() else config.COUNT_HOME)[kind]
+        ax, ay, bx, by = self._frac_box(region, frame)
+        text, worst = glyphs.read_text(frame[ay:by, ax:bx])
+        m = re.fullmatch(r"(\d{1,2})/(\d{1,2})", text)
+        if not m or int(m.group(1)) > int(m.group(2)):
+            if not getattr(self, "_warned_count", False):
+                log.info(f"Can't read the {kind} counter (saw {text!r}). Teach it with learn_glyphs.py "
+                         f"(type e.g. 2/2) or check COUNT_HOME / COUNT_SIDEBAR in config.py")
+                self._warned_count = True
             return None
-        ax, ay, bx, by = box
+        return int(m.group(1)), int(m.group(2))
+
+    def counter_sig(self, kind="builder"):
+        """What the counter shows now: ('free', n) if readable, else a picture of it."""
+        cnt = self.free_builders(kind)
+        if cnt is not None:
+            return ("free", cnt[0])
+        frame = self.look()
+        ax, ay, bx, by = self._frac_box(config.COUNT_HOME[kind], frame)
         g = cv2.cvtColor(frame[ay:by, ax:bx], cv2.COLOR_BGR2GRAY)
-        return cv2.resize(g, (60, 20)).astype(np.float32)
+        return ("img", cv2.resize(g, (60, 20)).astype(np.float32))
 
-    def no_builders_free(self):
-        return (self.vis.has(config.BUSY_TEMPLATE)
-                and self.vis.find(self.look(), config.BUSY_TEMPLATE) is not None)
+    def no_builders_free(self, kind="builder"):
+        cnt = self.free_builders(kind)
+        return cnt is not None and cnt[0] == 0
 
-    def verify_started(self, before, secs=None):
-        """An upgrade counts if the builder counter changed, or if it is so short that it may already be done."""
+    def verify_started(self, before, secs=None, kind="builder"):
+        """An upgrade counts if a builder became busy, or if it is so short that it may already be done."""
         if not self.recover():
             return False
+        self.close_list()                      # the sidebar can stay open after tapping an entry
         time.sleep(1.0)
-        after = self.counter_sig()
-        if before is None or after is None:
-            log.info("Can't read builder counter (builder_btn not visible?), trusting dialog check only")
+        after = self.counter_sig(kind)
+        if before is None or after is None or before[0] != after[0]:
+            log.info("Can't compare the builder counter before/after, trusting the dialog check only")
             return True
-        diff = float(np.abs(before - after).mean())
-        log.info(f"Builder counter change: {diff:.1f} (needs >= {config.COUNTER_DIFF})")
-        if diff >= config.COUNTER_DIFF:
+        if before[0] == "free":
+            log.info(f"Free {kind} slots: {before[1]} -> {after[1]}")
+            changed = after[1] < before[1]
+        else:
+            diff = float(np.abs(before[1] - after[1]).mean())
+            log.info(f"Builder counter change: {diff:.1f} (needs >= {config.COUNTER_DIFF})")
+            changed = diff >= config.COUNTER_DIFF
+        if changed:
             return True
         if secs is not None and secs <= config.INSTANT_SECS:
             log.info(f"Counter unchanged, but this upgrade only takes {ocr_time.fmt(secs)} so it was probably "
@@ -435,33 +449,39 @@ class Bot:
         log.info("Counter unchanged (very short or instant upgrades may not register on the counter)")
         return False
 
-    def _upgrade_loop(self):
+    def select_tab(self, kind):
+        """Tap the sidebar tile for this tab ("builder" or "lab"). Only call this while the sidebar is open."""
+        self.inp.click(*self.inp.frac(*config.TAB_POS[kind]))
+        time.sleep(1.0)
+
+    def _upgrade_loop(self, kind="builder"):
         skip = 0  # list entries that failed this cycle (e.g. can't afford)
-        for _ in range(config.MAX_UPGRADE_ATTEMPTS):
+        attempts = config.LAB_ATTEMPTS if kind == "lab" else config.MAX_UPGRADE_ATTEMPTS
+        for _ in range(attempts):
             if not self.running:
                 log.info("Upgrade loop: bot stopped")
                 return
-            if self.no_builders_free():
-                log.info("All builders busy, skipping upgrades")
+            if self.no_builders_free(kind):
+                log.info(f"No free {kind} slot, skipping")
                 return
             frame = self.look()
-            box = self.counter_box(frame)
-            self.snap("0_home", [(*box, True)] if box else None)
-            before = self.counter_sig()
+            self.snap(f"0_{kind}_home", [(*self._frac_box(config.COUNT_HOME[kind], frame), True)])
+            before = self.counter_sig(kind)
             self._last_secs = None
             if not self.open_list():
                 return
+            self.select_tab(kind)
             cands = self.upgrade_candidates()
-            self.snap("1_builder_list", getattr(self, "_boxes", None))
-            log.info(f"List scores {self.scores(config.UPGRADE_ITEMS)}; {len(cands)} candidate(s), skip={skip}")
+            self.snap(f"1_{kind}_list", getattr(self, "_boxes", None))
+            log.info(f"[{kind}] list scores {self.scores(config.UPGRADE_ITEMS)}; {len(cands)} candidate(s), skip={skip}")
             if skip >= len(cands):
                 self.close_list()
-                log.info("No more upgradeable items")
+                log.info(f"[{kind}] no more upgradeable items")
                 return
             self.inp.click(*cands[skip])
             self._list_open, self._closed_sig = False, None   # tapping an entry closes the list
             time.sleep(1.8)
-            self.snap("2_after_list_click")
+            self.snap(f"2_{kind}_after_list_click")
             # "New ..." entries drop straight into placement mode (red cancel X, no confirm dialog)
             if self.shop_open():
                 log.info("Entry is a NEW building: shop opened, buying the highlighted item")
@@ -474,7 +494,7 @@ class Bot:
                 # If the confirm dialog isn't up yet, we're on the info bar: press Upgrade first
                 if not self.confirm_visible():
                     self.click_any(config.UPGRADE_BTNS, 1.8)
-                    self.snap("3_after_upgrade_btn")
+                    self.snap(f"3_{kind}_after_upgrade_btn")
                 names = config.UPGRADE_BTNS + config.CONFIRM_BTNS + config.GEM_GUARDS
                 log.info(f"Dialog scores {self.scores(names)}")
                 if self.gems_prompt():
@@ -485,16 +505,16 @@ class Bot:
                     ok = self.safe_confirm()
             secs = getattr(self, "_last_secs", None)
             if ok:
-                ok = self.verify_started(before, secs)
+                ok = self.verify_started(before, secs, kind)
             if ok:
                 if secs:
                     state.add_timer(secs)
-                    log.info(f"Upgrade started, finishes in {ocr_time.fmt(secs)}")
+                    log.info(f"[{kind}] upgrade started, finishes in {ocr_time.fmt(secs)}")
                 else:
-                    log.info("Upgrade started")
+                    log.info(f"[{kind}] upgrade started")
             else:
-                log.info("Upgrade did not start, trying next")
-                self.snap("fail")
+                log.info(f"[{kind}] upgrade did not start, trying next")
+                self.snap(f"fail_{kind}")
                 skip += 1
             if not self.recover():
                 return
@@ -502,17 +522,14 @@ class Bot:
     # ---- timers / sessions ----
     def panel_sig(self):
         frame = self.look()
-        pt = self.vis.find(frame, "builder_btn")
-        if not pt:
-            return None
-        x1, x2, y1, y2 = config.LIST_PANEL_BOX
-        H, W = frame.shape[:2]
-        crop = frame[max(0, pt[1] + y1):min(H, pt[1] + y2), max(0, pt[0] + x1):min(W, pt[0] + x2)]
+        ax, ay, bx, by = self._frac_box(config.SIDEBAR_BOX, frame)
+        crop = frame[ay:by, ax:bx]
         if crop.size == 0:
             return None
         return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (50, 60)).astype(np.float32)
 
     def list_is_open(self):
+        """Is the 'Buildings & Heroes' sidebar showing? Best signal: the sidebar_title template."""
         headers = [n for n in config.LIST_HEADERS if self.vis.has(n)]
         if headers:
             frame = self.look()
@@ -523,16 +540,16 @@ class Bot:
         return float(np.abs(base - sig).mean()) > config.PANEL_DIFF
 
     def open_list(self):
-        """Open the builder list, but never toggle it closed if it's already open."""
+        """Open the sidebar, but never click again if it is already open."""
         if self.list_is_open():
             return True
         self._closed_sig = self.panel_sig()
-        if not self.click_tpl("builder_btn", 1.3):
-            log.info(f"Can't open the builder list: builder_btn not found "
-                     f"(best score {self.vis.score(self.look(), 'builder_btn'):.2f}, "
-                     f"needs {self.vis.thr('builder_btn'):.2f}). Recapture it as the icon only, "
-                     f"or add variants builder_btn1, builder_btn2")
-            self.snap("no_builder_btn")
+        if not self.click_tpl(config.OPEN_BTN, 1.3):
+            log.info(f"Can't open the sidebar: {config.OPEN_BTN} not found "
+                     f"(best score {self.vis.score(self.look(), config.OPEN_BTN):.2f}, "
+                     f"needs {self.vis.thr(config.OPEN_BTN):.2f}). Recapture it, or add variants "
+                     f"{config.OPEN_BTN}1, {config.OPEN_BTN}2")
+            self.snap("no_open_btn")
             return False
         self._list_open = True
         return True
@@ -541,81 +558,41 @@ class Bot:
         for i in range(3):
             if not self.list_is_open():
                 break
-            if i == 0:
-                self.click_tpl("builder_btn", 0.9)          # the icon toggles the list
-            else:
-                self.inp.click(*self.inp.frac(*config.LIST_CLOSE_TAP))   # fall back to tapping outside
+            if not self.click_any(config.LIST_CLOSE_BTNS, 0.9):
+                self.inp.click(*self.inp.frac(*config.LIST_CLOSE_TAP))   # no X template matched: tap the village
                 time.sleep(0.9)
             self._list_open = False
         self._closed_sig = None
         self.recover()
 
-    def refresh_timers(self):
-        """(Optional) Open the builder list, OCR the remaining times, save them to state.json."""
-        if not config.READ_LIST_TIMERS:
-            return None
-        if not ocr_time.available():
-            if not getattr(self, "_warned_ocr", False):
-                log.info("OCR unavailable (install Tesseract + pip install pytesseract): timers not tracked")
-                self._warned_ocr = True
-            return None
-        if not self.open_list():
-            return None
-        frame = self.look()
-        pt = self.vis.find(frame, "builder_btn")
-        if not pt:
-            log.info("Timers: list open but builder_btn not visible, can't place the panel crop")
-            self.close_list()
-            return None
-        x1, x2, y1, y2 = config.LIST_PANEL_BOX
-        H, W = frame.shape[:2]
-        ay, by = max(0, pt[1] + y1), min(H, pt[1] + y2)
-        ax, bx = max(0, pt[0] + x1), min(W, pt[0] + x2)
-        crop = frame[ay:by, ax:bx]
-        band, found = crop, []
-        hdr = config.PROGRESS_HEADER
-        if self.vis.has(hdr):
-            hp = self.vis.find(frame, hdr)
-            if hp is None:
-                log.info("No 'Upgrades in progress' section, so nothing is running")
-                band = None
-            else:
-                top = hp[1] + self.vis.t[hdr].shape[0] // 2 - ay
-                ends = []
-                for n in config.LIST_HEADERS:
-                    p = self.vis.find(frame, n) if self.vis.has(n) else None
-                    if p and p[1] > hp[1] + 10:
-                        ends.append(p[1] - ay - 6)
-                bottom = min(ends) if ends else top + config.NUM_BUILDERS * 45 + 20
-                if bottom <= top:
-                    bottom = top + config.NUM_BUILDERS * 45 + 20
-                band = crop[max(0, top):min(crop.shape[0], bottom)]
-        elif not getattr(self, "_warned_hdr", False):
-            log.info("Tip: capture the 'Upgrades in progress:' title as list_progress for more reliable timers")
-            self._warned_hdr = True
-        if band is not None and band.size:
-            found, lines, _ = ocr_time.find_times(band)
-            if config.DEBUG:
-                os.makedirs("debug", exist_ok=True)
-                cv2.imwrite(os.path.join("debug", f"{time.strftime('%H%M%S')}_timers_band.png"), band)
-        secs = [t for _, t in found][:config.NUM_BUILDERS]
-        log.info(f"Timers read: {[(l.strip(), t) for l, t in found]}")
-        state.set_timers(secs)
-        self.close_list()
-        return secs
-
     def builders_busy(self):
-        if self.vis.has(config.BUSY_TEMPLATE):
-            return self.no_builders_free()          # the on-screen counter is the ground truth
+        cnt = self.free_builders()
+        if cnt is not None:
+            return cnt[0] == 0
         return state.active_count() >= config.NUM_BUILDERS
 
     def upgrade(self):
-        self.refresh_timers()
+        cnt = self.free_builders()
+        if cnt is not None:
+            log.info(f"Free builders: {cnt[0]}/{cnt[1]}")
         if self.builders_busy():
-            log.info("All builders busy, skipping upgrades")
+            log.info("All builders busy, skipping building upgrades")
+        else:
+            self._upgrade_loop("builder")
+        if config.LAB_UPGRADES and self.running:
+            self.lab_upgrade()
+
+    def lab_upgrade(self):
+        """Laboratory tab: same entries and dialog as upgrades, but its own slot (only one runs at a time)."""
+        cnt = self.free_builders("lab")
+        if cnt is None:
+            log.info("Skipping lab upgrades: can't read the lab counter (the '1/1' next to the Build button)")
             return
-        self._upgrade_loop()
-        self.refresh_timers()
+        log.info(f"Free lab slots: {cnt[0]}/{cnt[1]}")
+        if cnt[0] == 0:
+            log.info("Laboratory busy, skipping")
+            return
+        self._upgrade_loop("lab")
 
     def session(self):
         log.info("Phase: recover")
@@ -631,7 +608,7 @@ class Bot:
         end = time.time() + timeout
         last = 0
         while time.time() < end and self.running:
-            if self.vis.find(self.look(), "builder_btn"):
+            if self.vis.find(self.look(), config.HOME_ANCHOR):
                 time.sleep(2.0)       # let the village settle
                 return True
             if time.time() - last > 10:   # dismiss login/reward popups while loading

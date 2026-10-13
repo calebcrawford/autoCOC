@@ -54,7 +54,8 @@ def load(force=False):
             m = _NAME.match(os.path.basename(p))
             if m:
                 g = cv2.imread(p, cv2.IMREAD_GRAYSCALE).astype(np.float32) / 255
-                _lib.append((m.group(1), g, float(m.group(3)), float(m.group(4))))
+                ch = "/" if m.group(1) == "~" else m.group(1)      # '/' is stored as '~' (not allowed in filenames)
+                _lib.append((ch, g, float(m.group(3)), float(m.group(4))))
     return _lib
 
 def dist(g, t):
@@ -119,6 +120,7 @@ def save_glyphs(img, chars):
         return -1
     os.makedirs(config.GLYPH_DIR, exist_ok=True)
     for g, ch in zip(gl, chars):
+        ch = "~" if ch == "/" else ch
         k = len(glob.glob(os.path.join(config.GLYPH_DIR, f"{ch}_*.png")))
         name = f"{ch}_{k}_{g['rel']:.2f}_{g['ar']:.2f}.png"
         cv2.imwrite(os.path.join(config.GLYPH_DIR, name), (g["img"] * 255).astype(np.uint8))

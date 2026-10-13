@@ -167,6 +167,42 @@ UPGRADE_TIME_FROM_LABEL = (-62, 73, 13, 55)
 #               (wgc needs: pip install windows-capture. printwindow needs: pip install pywin32.)
 # The game window must NOT be minimised in any mode: Android stops drawing it.
 # Run probe_background.py to find out what works on your machine.
-INPUT_MODE = "CROSVM_1"
+INPUT_MODE = "postmessage"
 CAPTURE_MODE = "mss"
 TARGET_CLASS = None     # window class that should receive clicks; None = auto (the probe tells you what worked)
+
+
+# ======== 2026 UI update: Build button + "Buildings & Heroes" sidebar ========
+OPEN_BTN = "build_btn"        # the button on the village screen that opens the sidebar
+HOME_ANCHOR = "build_btn"     # only visible on the village screen with the sidebar closed
+# Sidebar area that holds the entries (fractions of the window: x1, y1, x2, y2). The HUD shifts left when it is open.
+SIDEBAR_BOX = (0.742, 0.10, 1.0, 0.88)
+LIST_HEADERS = ["sidebar_title"]                  # template: the words "Buildings & Heroes" at the top of the sidebar
+LIST_CLOSE_BTNS = ["sidebar_close", "close_btn"]  # the red X at the sidebar's top right
+CLOSE_BTNS = ["close_btn", "gem_close", "shop_close", "sidebar_close"]
+LIST_TEXT_BOX = (-85, -9, -10, 10)   # price number sits LEFT of the cost icon in the sidebar
+# "free/total" builder counter, read with the glyph reader (fractions of the window)
+BUILDER_COUNT_HOME = (0.928, 0.798, 0.959, 0.837)      # the "2/2" above the Build button
+BUILDER_COUNT_SIDEBAR = (0.7564, 0.927, 0.788, 0.969)  # the "2/2" tile at the bottom of the sidebar
+USE_SHOP = False   # the sidebar handles new buildings too; the old shop path is switched off
+# Only the far-right strip of the sidebar, where the cost icons (coin / drop / gem) sit. Searching just here keeps the
+# building thumbnails on the left of each entry from being mistaken for cost icons.
+SIDEBAR_COST_STRIP = (0.95, 0.10, 1.0, 0.88)
+
+# Tapping a sidebar entry opens the confirm dialog straight away, so the old info-bar "Upgrade" button step is off.
+# (Put ["upgrade_gold", "upgrade_elixir"] back here if a screen ever needs that extra tap.)
+UPGRADE_BTNS = []
+
+# ---- Speed (collecting) ----
+SCALES = [0.85, 1.0, 1.2]      # sizes tried for MULTI_SCALE templates (was 7; fewer = proportionally faster)
+GRAY_MATCH = []         # templates matched in grayscale, about 3x cheaper per search
+LOOT_STOP = 0.85               # stop checking a type's variants once one scores this well
+
+# ---- Laboratory (the second tab at the bottom of the sidebar: potion icon, counter "1/1") ----
+LAB_UPGRADES = True
+LAB_ATTEMPTS = 3             # entries to try per session (the lab only runs one at a time)
+# Where each counter is read, as fractions of the window (x1, y1, x2, y2)
+COUNT_HOME = {"builder": BUILDER_COUNT_HOME, "lab": (0.961, 0.798, 0.987, 0.837)}        # above the Build button
+COUNT_SIDEBAR = {"builder": BUILDER_COUNT_SIDEBAR, "lab": (0.8219, 0.927, 0.8535, 0.969)}  # tiles at the sidebar's bottom
+# Where to tap to switch tabs (the tiles at the bottom of the sidebar)
+TAB_POS = {"builder": (0.772, 0.913), "lab": (0.837, 0.913)}

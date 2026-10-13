@@ -2,9 +2,9 @@
 
 Part 1: lists the game's windows.
 Part 2: grabs a frame with each capture method (once visible, once with something covering the game).
-Part 3: tries posting a click to each candidate window and sees if the builder list opens. Your cursor must not move.
+Part 3: tries posting a click to each candidate window and sees if the sidebar opens. Your cursor must not move.
 
-Before you start: game open on the village (home screen), builder list CLOSED, window not minimised."""
+Before you start: game open on the village (home screen), sidebar CLOSED, window not minimised."""
 import ctypes, os, time
 import cv2, numpy as np
 import config
@@ -17,10 +17,10 @@ def cursor():
     ctypes.windll.user32.GetCursorPos(ctypes.byref(p))
     return p.x, p.y
 
-def panel_sig(frame, bpt):
-    x1, x2, y1, y2 = config.LIST_PANEL_BOX
+def panel_sig(frame):
     H, W = frame.shape[:2]
-    crop = frame[max(0, bpt[1] + y1):min(H, bpt[1] + y2), max(0, bpt[0] + x1):min(W, bpt[0] + x2)]
+    x1, y1, x2, y2 = config.SIDEBAR_BOX
+    crop = frame[int(H * y1):int(H * y2), int(W * x1):int(W * x2)]
     return cv2.resize(cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY), (50, 60)).astype(np.float32)
 
 def countdown(msg, n=8):
@@ -63,13 +63,13 @@ def main():
     print(" Open debug/probe_*_covered.png. A method works if it shows the GAME, not the window on top.")
     print(" ('mss' showing the other window is expected: it reads screen pixels.)")
 
-    countdown("Bring the game back on top, home screen, builder list closed.", 8)
+    countdown("Bring the game back on top, home screen, sidebar closed.", 8)
     print("\nPART 3: background clicks (watch your mouse: it must NOT move)")
     frame = gw.grab()
-    bpt = vis.find(frame, "builder_btn")
+    bpt = vis.find(frame, config.OPEN_BTN)
     if not bpt:
-        raise SystemExit("builder_btn not found on screen, can't run the click test.")
-    base = panel_sig(frame, bpt)
+        raise SystemExit(f"{config.OPEN_BTN} not found on screen, can't run the click test.")
+    base = panel_sig(frame)
     cands = [w for w in wins if w[4] or w[0] == gw.hwnd]
     cands.sort(key=lambda w: -(w[2] * w[3]))
     seen, worked = set(), None
@@ -81,13 +81,18 @@ def main():
         inp = actions.Input(gw, mode="postmessage", target=h)
         inp.click(*bpt)
         time.sleep(1.6)
-        diff = float(np.abs(panel_sig(gw.grab(), bpt) - base).mean())
+        diff = float(np.abs(panel_sig(gw.grab()) - base).mean())
         moved = cursor() != before
-        print(f"  target {cls:38} list opened: {'YES' if diff > config.PANEL_DIFF else 'no ':3} (change {diff:5.1f})  cursor moved: {'YES' if moved else 'no'}")
+        print(f"  target {cls:38} sidebar opened: {'YES' if diff > config.PANEL_DIFF else 'no ':3} (change {diff:5.1f})  cursor moved: {'YES' if moved else 'no'}")
         if diff > config.PANEL_DIFF:
             worked = (h, cls)
-            inp.click(*bpt)                      # toggle the list closed again
-            time.sleep(1.2)
+            frame = gw.grab()
+            xpt = next((vis.find(frame, n) for n in config.LIST_CLOSE_BTNS if vis.has(n) and vis.find(frame, n)), None)
+            if xpt:
+                inp.click(*xpt)                  # close the sidebar again with its X
+                time.sleep(1.2)
+            else:
+                print("  (no sidebar_close / close_btn template yet, please close the sidebar yourself)")
             break
     print()
     if worked:
